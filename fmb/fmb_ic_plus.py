@@ -361,8 +361,8 @@ class FMBICPlusChannel(Device):
         self.set_state(DevState.RUNNING)
         self.debug_stream("Starting measurement on {} device".format(
                           self.address))
-        start_time = time.time()
-        while time.time() - start_time <= self._exposition_time:
+        start_time = time.perf_counter()
+        while time.perf_counter() - start_time <= self._exposition_time:
             try:
                 if self._stop:
                     break
@@ -371,9 +371,12 @@ class FMBICPlusChannel(Device):
                         [self.address, int(
                             self._exposition_time /
                             FMBICPlusChannel.MIN_EXPOSITION_TIME)])
-                    result += self._range.to_amperes(iter)
-                    result_raw += iter
-                    cycles += 1
+                    if iter == -1:
+                        continue
+                    else:
+                        result += self._range.to_amperes(iter)
+                        result_raw += iter
+                        cycles += 1
             except serial.SerialException as se:
                 self.error_stream("Following error occurred while fetching "
                                   "data from {} device\n.{}".format(
@@ -385,8 +388,12 @@ class FMBICPlusChannel(Device):
                                                                     result,
                                                                     result_raw,
                                                                     cycles))
-        self._current = result / cycles
-        self._raw_current = result_raw / cycles
+        if cycles > 0:
+            self._current = result / cycles
+            self._raw_current = result_raw / cycles
+        else:
+            self._current = nan
+            self._raw_current = -1
         self._stop = False
         self.set_state(DevState.ON)
 
@@ -402,6 +409,7 @@ class FMBICPlusChannel(Device):
         """
         state = self.get_state()
         if state == DevState.ON:
+            self._stop = False
             thread = Thread(target=self.__measure)
             thread.start()
         else:
@@ -416,11 +424,16 @@ class FMBICPlusChannel(Device):
         """
         A command to abort current measurement and turn a device
         into ON state. Attribute "current" is NaN in this case.
-        Allowed DevState states: RUNNING.
+        Allowed DevState states: RUNNING, ON.
         """
         state = self.get_state()
         if state == DevState.RUNNING:
             self.debug_stream("Stopping measurement on {} device".format(
+                              self.address))
+            self._stop = True
+            self.set_state(DevState.ON)
+        elif state == DevState.ON:
+            self.debug_stream("{} device already stopped".format(
                               self.address))
             self._stop = True
         else:
@@ -598,13 +611,12 @@ class FMBICPlusHost(Device):
             self.info_stream("The answer received from device "
                              "is: {}".format(answer))
             if ((len(answer) < 3 and data_expected) or
-                    (answer != b'\x06' and not data_expected)):
-                self.error_stream(
+                    (answer != b'\x06' and not data_expected)) or not answer:
+                self.warn_stream(
                     "An IC didn't respond correctly within {} "
                     "seconds of timeout and {} of execution time".format(
                         self.command_timeout, execution_time))
-                self.set_state(DevState.FAULT)
-                raise DevFailed()
+                return -1
             data = int(answer[1:-1]) if data_expected else 0
             self.debug_stream("An IC responded correctly{}"
                               .format(" with data {}".format(data)
